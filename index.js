@@ -293,7 +293,7 @@ app.post(
 
         case "payment_intent.payment_failed": {
           const pi = event.data.object;
-          console.warn("💸 Payment failed:", pi.last_payment_error?.message || "unknown reason");
+          console.warn(" Payment failed:", pi.last_payment_error?.message || "unknown reason");
           break;
         }
 
@@ -307,6 +307,74 @@ app.post(
       res.status(500).send({ ok: false, message: "Webhook processing failed" });
     }
   }
+);
+// ---------------- Helpers for user management ----------------
+const { ObjectId } = require("mongodb");
+
+// small helper to wrap async routes (added before, reused here)
+const isValidObjectId = (id) => {
+  try {
+    return new ObjectId(id).toString() === id.toString();
+  } catch {
+    return false;
+  }
+};
+
+function buildSetOnInsert(defaults, toSet) {
+  const out = {};
+  for (const k of Object.keys(defaults)) {
+    if (toSet[k] === undefined) out[k] = defaults[k];
+  }
+  return out;
+}
+
+// ---------------- Routes: User Auth Sync ----------------
+/**
+ * POST /api/auth/sync
+ * Accepts a user profile or idToken; upserts user by email.
+ */
+app.post(
+  "/api/auth/sync",
+  wrap(async (req, res) => {
+    const payload = req.body || {};
+    if (!payload.email) {
+      return res.status(400).send({ ok: false, message: "email required" });
+    }
+
+    const { db } = await connectDB();
+    const users = db.collection("users");
+
+    // only allow safe fields for upsert
+    const safeFields = [
+      "email",
+      "name",
+      "avatar",
+      "bloodGroup",
+      "district",
+      "upazila",
+      "role",
+      "status",
+    ];
+
+    const toSet = {};
+    for (const field of safeFields) {
+      if (payload[field] !== undefined) toSet[field] = payload[field];
+    }
+
+    toSet.updatedAt = new Date();
+    if (payload.idToken) toSet.idToken = payload.idToken;
+
+    const defaults = { createdAt: new Date(), role: "donor", status: "active" };
+    const setOnInsert = buildSetOnInsert(defaults, toSet);
+
+    const result = await users.updateOne(
+      { email: payload.email },
+      { $set: toSet, ...(Object.keys(setOnInsert).length ? { $setOnInsert: setOnInsert } : {}) },
+      { upsert: true }
+    );
+
+    res.send({ ok: true, message: "Auth sync upserted", data: result });
+  })
 );
 
 // ------------- Test route -------------
