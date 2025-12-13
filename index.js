@@ -849,6 +849,45 @@ app.patch(
     res.send({ ok: true, message: "Status updated", data: result });
   })
 );
+// ---------------- Routes: Donation Requests (Delete) ----------------
+
+// Canonical deletion: DELETE /donation-requests/:id
+app.delete(
+  "/donation-requests/:id",
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    if (!isValidObjectId(id))
+      return res.status(400).send({ ok: false, message: "Invalid request id" });
+
+    const { db } = await connectDB();
+    const requests = db.collection("donationRequests");
+
+    const result = await requests.deleteOne({ _id: new ObjectId(id) });
+    if (!result.deletedCount)
+      return res.status(404).send({ ok: false, message: "Request not found" });
+
+    res.send({ ok: true, message: "Request deleted" });
+  })
+);
+
+// Legacy deletion: DELETE /requests/:id
+app.delete(
+  "/requests/:id",
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    if (!isValidObjectId(id))
+      return res.status(400).send({ ok: false, message: "Invalid request id" });
+
+    const { db } = await connectDB();
+    const requests = db.collection("donationRequests");
+
+    const result = await requests.deleteOne({ _id: new ObjectId(id) });
+    if (!result.deletedCount)
+      return res.status(404).send({ ok: false, message: "Request not found" });
+
+    res.send({ ok: true, message: "Request deleted" });
+  })
+);
 // ------------- Test route -------------
 app.get("/", (req, res) => res.send("Stripe PaymentIntent endpoint active"));
 
