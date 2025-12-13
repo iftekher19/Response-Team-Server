@@ -888,6 +888,70 @@ app.delete(
     res.send({ ok: true, message: "Request deleted" });
   })
 );
+// ---------------- Routes: Funds ----------------
+
+// POST /funds – record a donation manually
+app.post(
+  "/funds",
+  wrap(async (req, res) => {
+    const payload = req.body || {};
+    if (!payload.userEmail || payload.amount === undefined)
+      return res
+        .status(400)
+        .send({ ok: false, message: "userEmail and amount required" });
+
+    const { db } = await connectDB();
+    const funds = db.collection("funds");
+
+    const doc = {
+      userEmail: payload.userEmail,
+      amount: Number(payload.amount),
+      transactionId: payload.transactionId || null,
+      createdAt: new Date(),
+    };
+
+    const result = await funds.insertOne(doc);
+    res
+      .status(201)
+      .send({ ok: true, message: "Fund recorded successfully", data: result });
+  })
+);
+
+// GET /funds – list all recorded donations, newest first
+app.get(
+  "/funds",
+  wrap(async (req, res) => {
+    const { db } = await connectDB();
+    const funds = db.collection("funds");
+
+    const docs = await funds.find({}).sort({ createdAt: -1 }).toArray();
+    res.send({ ok: true, data: docs });
+  })
+);
+
+// GET /funds/summary – aggregated totals and count
+app.get(
+  "/funds/summary",
+  wrap(async (req, res) => {
+    const { db } = await connectDB();
+    const funds = db.collection("funds");
+
+    const agg = await funds
+      .aggregate([
+        {
+          $group: {
+            _id: null,
+            total: { $sum: "$amount" },
+            count: { $sum: 1 },
+          },
+        },
+      ])
+      .toArray();
+
+    const summary = agg[0] || { total: 0, count: 0 };
+    res.send({ ok: true, data: summary });
+  })
+);
 // ------------- Test route -------------
 app.get("/", (req, res) => res.send("Stripe PaymentIntent endpoint active"));
 
