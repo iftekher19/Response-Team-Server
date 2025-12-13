@@ -538,7 +538,91 @@ app.patch(
     res.send({ ok: true, message: "Status updated", data: result });
   })
 );
+// ---------------- Routes: Donation Requests (Create) ----------------
+/**
+ * Canonical route: POST /donation-requests
+ * Compatibility route: POST /requests
+ */
 
+app.post(
+  "/donation-requests",
+  wrap(async (req, res) => {
+    const payload = req.body || {};
+    if (!payload.requesterEmail)
+      return res.status(400).send({ ok: false, message: "requesterEmail is required" });
+
+    const { db } = await connectDB();
+    const users = db.collection("users");
+    const requests = db.collection("donationRequests");
+
+    // Verify requester exists and is allowed
+    const requester = await users.findOne({ email: payload.requesterEmail });
+    if (!requester)
+      return res.status(400).send({ ok: false, message: "Requester not found" });
+    if (requester.status === "blocked")
+      return res.status(403).send({ ok: false, message: "User is blocked" });
+
+    const newReq = {
+      requesterEmail: payload.requesterEmail,
+      requesterName: payload.requesterName || requester.name || "",
+      recipientName: payload.recipientName || "",
+      recipientDistrict: payload.recipientDistrict || "",
+      recipientUpazila: payload.recipientUpazila || "",
+      hospitalName: payload.hospitalName || "",
+      fullAddress: payload.fullAddress || "",
+      bloodGroup: payload.bloodGroup || "",
+      donationDate: payload.donationDate || "",
+      donationTime: payload.donationTime || "",
+      requestMessage: payload.requestMessage || "",
+      status: payload.status || "pending",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await requests.insertOne(newReq);
+    res.status(201).send({ ok: true, message: "Donation request created", data: result });
+  })
+);
+
+// Compatibility route: POST /requests
+app.post(
+  "/requests",
+  wrap(async (req, res) => {
+    const payload = req.body || {};
+    if (!payload.requesterEmail)
+      return res.status(400).send({ ok: false, message: "requesterEmail is required" });
+
+    const { db } = await connectDB();
+    const users = db.collection("users");
+    const requests = db.collection("donationRequests");
+
+    const requester = await users.findOne({ email: payload.requesterEmail });
+    if (!requester)
+      return res.status(400).send({ ok: false, message: "Requester not found" });
+    if (requester.status === "blocked")
+      return res.status(403).send({ ok: false, message: "User is blocked" });
+
+    const newReq = {
+      requesterEmail: payload.requesterEmail,
+      requesterName: payload.requesterName || requester.name || "",
+      recipientName: payload.recipientName || "",
+      recipientDistrict: payload.recipientDistrict || "",
+      recipientUpazila: payload.recipientUpazila || "",
+      hospitalName: payload.hospitalName || "",
+      fullAddress: payload.fullAddress || "",
+      bloodGroup: payload.bloodGroup || "",
+      donationDate: payload.donationDate || "",
+      donationTime: payload.donationTime || "",
+      requestMessage: payload.requestMessage || "",
+      status: payload.status || "pending",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const result = await requests.insertOne(newReq);
+    res.status(201).send({ ok: true, message: "Donation request created", data: result });
+  })
+);
 // ------------- Test route -------------
 app.get("/", (req, res) => res.send("Stripe PaymentIntent endpoint active"));
 
