@@ -719,7 +719,136 @@ app.get(
     res.send({ ok: true, data: docs });
   })
 );
+// ---------------- Routes: Donation Requests (Read / Update) ----------------
 
+// GET /donation-requests/:id – fetch single request
+app.get(
+  "/donation-requests/:id",
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    if (!isValidObjectId(id))
+      return res.status(400).send({ ok: false, message: "Invalid request id" });
+
+    const { db } = await connectDB();
+    const requests = db.collection("donationRequests");
+    const doc = await requests.findOne({ _id: new ObjectId(id) });
+
+    if (!doc)
+      return res.status(404).send({ ok: false, message: "Request not found" });
+
+    res.send({ ok: true, data: doc });
+  })
+);
+
+// Legacy alias: GET /requests/:id
+app.get(
+  "/requests/:id",
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    if (!isValidObjectId(id))
+      return res.status(400).send({ ok: false, message: "Invalid request id" });
+
+    const { db } = await connectDB();
+    const requests = db.collection("donationRequests");
+    const doc = await requests.findOne({ _id: new ObjectId(id) });
+
+    if (!doc)
+      return res.status(404).send({ ok: false, message: "Request not found" });
+
+    res.send({ ok: true, data: doc });
+  })
+);
+
+// PATCH /donation-requests/:id – update editable fields
+app.patch(
+  "/donation-requests/:id",
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    if (!isValidObjectId(id))
+      return res.status(400).send({ ok: false, message: "Invalid request id" });
+
+    const updates = req.body || {};
+    const allowed = [
+      "status",
+      "donorName",
+      "donorEmail",
+      "donationDate",
+      "donationTime",
+      "requestMessage",
+    ];
+    const toSet = {};
+    for (const key of allowed) {
+      if (updates[key] !== undefined) toSet[key] = updates[key];
+    }
+    toSet.updatedAt = new Date();
+
+    const { db } = await connectDB();
+    const requests = db.collection("donationRequests");
+    const result = await requests.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: toSet }
+    );
+
+    res.send({ ok: true, message: "Request updated", data: result });
+  })
+);
+
+// Legacy alias: PATCH /requests/:id – same behavior
+app.patch(
+  "/requests/:id",
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    if (!isValidObjectId(id))
+      return res.status(400).send({ ok: false, message: "Invalid request id" });
+
+    const updates = req.body || {};
+    const allowed = [
+      "status",
+      "donorName",
+      "donorEmail",
+      "donationDate",
+      "donationTime",
+      "requestMessage",
+    ];
+    const toSet = {};
+    for (const key of allowed) {
+      if (updates[key] !== undefined) toSet[key] = updates[key];
+    }
+    toSet.updatedAt = new Date();
+
+    const { db } = await connectDB();
+    const requests = db.collection("donationRequests");
+    const result = await requests.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: toSet }
+    );
+
+    res.send({ ok: true, message: "Request updated", data: result });
+  })
+);
+
+// Convenience: PATCH /requests/:id/status – quick status toggle
+app.patch(
+  "/requests/:id/status",
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    if (!isValidObjectId(id))
+      return res.status(400).send({ ok: false, message: "Invalid request id" });
+
+    const { status } = req.body;
+    if (!status)
+      return res.status(400).send({ ok: false, message: "status required" });
+
+    const { db } = await connectDB();
+    const requests = db.collection("donationRequests");
+    const result = await requests.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status, updatedAt: new Date() } }
+    );
+
+    res.send({ ok: true, message: "Status updated", data: result });
+  })
+);
 // ------------- Test route -------------
 app.get("/", (req, res) => res.send("Stripe PaymentIntent endpoint active"));
 
