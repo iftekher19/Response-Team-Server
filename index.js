@@ -106,6 +106,98 @@ app.post(
   })
 );
 
+// ---------------- Stripe: create Checkout Session ----------------
+app.post(
+  "/create-checkout-session",
+  wrap(async (req, res) => {
+    const { amount, currency = "usd", userEmail, name = "Donation" } = req.body || {};
+    if (!amount || !userEmail)
+      return res.status(400).send({ ok: false, message: "amount and userEmail required" });
+
+    const amt = Number(amount);
+    if (Number.isNaN(amt) || amt <= 0)
+      return res.status(400).send({ ok: false, message: "Invalid amount" });
+
+    const amountCents = Math.round(amt * 100);
+
+    try {
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        line_items: [
+          {
+            price_data: {
+              currency,
+              product_data: { name },
+              unit_amount: amountCents,
+            },
+            quantity: 1,
+          },
+        ],
+        customer_email: userEmail,
+        metadata: { userEmail },
+        success_url: `${process.env.CLIENT_URL || "http://localhost:5173"}/dashboard/funding-success`,
+        cancel_url: `${process.env.CLIENT_URL || "http://localhost:5173"}/funding-cancel`,
+      });
+
+      res.send({ ok: true, url: session.url, id: session.id });
+    } catch (err) {
+      console.error("create-checkout-session error:", err);
+      res.status(500).send({ ok: false, message: "Could not create checkout session" });
+    }
+  })
+);
+
+// ---------------- Stripe: retrieve Checkout Session ----------------
+app.get(
+  "/checkout-session",
+  wrap(async (req, res) => {
+    const sessionId = req.query.session_id || req.headers["x-session-id"];
+    if (!sessionId)
+      return res.status(400).send({ ok: false, message: "session_id query required" });
+
+    try {
+      const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent"] });
+
+      const userEmail = session.customer_email || session.metadata?.userEmail || null;
+      const amountCents = session.amount_total ?? session.payment_intent?.amount ?? 0;
+      const currency = session.currency || session.payment_intent?.currency || "usd";
+      const paymentIntentId = session.payment_intent?.id || session.payment_intent || null;
+      const checkoutSessionId = session.id;
+
+      const { db } = await connectDB();
+      const funds = db.collection("funds");
+
+      // Ensure idempotency — no duplicate records
+      const existing = await funds.findOne({
+        $or: [
+          { stripeCheckoutSession: checkoutSessionId },
+          { stripePaymentIntent: paymentIntentId },
+        ],
+      });
+
+      if (existing)
+        return res.send({ ok: true, recorded: false, message: "Already recorded", data: existing });
+
+      const doc = {
+        userEmail,
+        amount: Number(amountCents) / 100,
+        currency,
+        transactionId: paymentIntentId || checkoutSessionId,
+        stripeCheckoutSession: checkoutSessionId,
+        stripePaymentIntent: paymentIntentId,
+        createdAt: new Date(),
+        meta: { stripe: true, source: "checkout-session-reconcile" },
+      };
+
+      const result = await funds.insertOne(doc);
+      res.send({ ok: true, recorded: true, data: result });
+    } catch (err) {
+      console.error("Error retrieving checkout-session:", err);
+      res.status(500).send({ ok: false, message: "Failed to retrieve or record session", error: err.message });
+    }
+  })
+);
+
 // ------------- Test route -------------
 app.get("/", (req, res) => res.send("Stripe PaymentIntent endpoint active"));
 
