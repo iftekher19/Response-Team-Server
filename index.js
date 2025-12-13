@@ -376,6 +376,168 @@ app.post(
     res.send({ ok: true, message: "Auth sync upserted", data: result });
   })
 );
+// ---------------- Routes: Users ----------------
+
+/**
+ * POST  /users          -> upsert user (called by frontend)
+ * GET   /users          -> list / query users
+ * PATCH /users/:id      -> partial update
+ * PUT   /users/:id/profile -> replace/sync profile (email immutable)
+ * PATCH /users/:id/role     -> update user role
+ * PATCH /users/:id/status   -> update user status
+ */
+
+// POST /users – upsert user by email
+app.post(
+  "/users",
+  wrap(async (req, res) => {
+    const user = req.body || {};
+    if (!user.email)
+      return res.status(400).send({ ok: false, message: "Email is required" });
+
+    const { db } = await connectDB();
+    const users = db.collection("users");
+
+    const allowed = [
+      "email",
+      "name",
+      "avatar",
+      "bloodGroup",
+      "district",
+      "upazila",
+      "role",
+      "status",
+      "idToken",
+    ];
+
+    const toSet = {};
+    for (const f of allowed) {
+      if (user[f] !== undefined) toSet[f] = user[f];
+    }
+    toSet.updatedAt = new Date();
+
+    const defaults = { createdAt: new Date(), role: "donor", status: "active" };
+    const setOnInsert = buildSetOnInsert(defaults, toSet);
+
+    const result = await users.updateOne(
+      { email: toSet.email },
+      { $set: toSet, ...(Object.keys(setOnInsert).length ? { $setOnInsert: setOnInsert } : {}) },
+      { upsert: true }
+    );
+
+    res.status(200).send({ ok: true, message: "User upserted", data: result });
+  })
+);
+
+// GET /users – list or query
+app.get(
+  "/users",
+  wrap(async (req, res) => {
+    const { db } = await connectDB();
+    const users = db.collection("users");
+
+    const filter = {};
+    if (req.query.email) filter.email = req.query.email;
+    if (req.query.role) filter.role = req.query.role;
+    if (req.query.status) filter.status = req.query.status;
+
+    const docs = await users.find(filter).toArray();
+    res.send({ ok: true, data: docs });
+  })
+);
+
+// PATCH /users/:id – partial update (cannot change email)
+app.patch(
+  "/users/:id",
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    if (!isValidObjectId(id))
+      return res.status(400).send({ ok: false, message: "Invalid user id" });
+
+    const updates = { ...req.body };
+    delete updates.email;
+    updates.updatedAt = new Date();
+
+    const { db } = await connectDB();
+    const users = db.collection("users");
+
+    const result = await users.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updates }
+    );
+
+    res.send({ ok: true, message: "User updated", data: result });
+  })
+);
+
+// PUT /users/:id/profile – update profile fields (immutable email)
+app.put(
+  "/users/:id/profile",
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    if (!isValidObjectId(id))
+      return res.status(400).send({ ok: false, message: "Invalid user id" });
+
+    const payload = { ...req.body };
+    delete payload.email;
+
+    const allowed = ["name", "avatar", "bloodGroup", "district", "upazila", "role", "status"];
+    const toSet = {};
+    for (const k of allowed) {
+      if (payload[k] !== undefined) toSet[k] = payload[k];
+    }
+    toSet.updatedAt = new Date();
+
+    const { db } = await connectDB();
+    const users = db.collection("users");
+
+    const result = await users.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: toSet }
+    );
+    res.send({ ok: true, message: "Profile updated", data: result });
+  })
+);
+
+// PATCH /users/:id/role – change user role
+app.patch(
+  "/users/:id/role",
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    const { role } = req.body;
+    if (!isValidObjectId(id))
+      return res.status(400).send({ ok: false, message: "Invalid user id" });
+    if (!role) return res.status(400).send({ ok: false, message: "role required" });
+
+    const { db } = await connectDB();
+    const users = db.collection("users");
+    const result = await users.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { role, updatedAt: new Date() } }
+    );
+    res.send({ ok: true, message: "Role updated", data: result });
+  })
+);
+
+// PATCH /users/:id/status – change user status
+app.patch(
+  "/users/:id/status",
+  wrap(async (req, res) => {
+    const id = req.params.id;
+    const { status } = req.body;
+    if (!isValidObjectId(id))
+      return res.status(400).send({ ok: false, message: "Invalid user id" });
+    if (!status) return res.status(400).send({ ok: false, message: "status required" });
+
+    const { db } = await connectDB();
+    const users = db.collection("users");
+    const result = await users.updateOne(
+      { _id: new ObjectId(id) },
+      { $set: { status, updatedAt: new Date() } }
+    );
+    res.send({ ok: true, message: "Status updated", data: result });
+  })
+);
 
 // ------------- Test route -------------
 app.get("/", (req, res) => res.send("Stripe PaymentIntent endpoint active"));
