@@ -5,6 +5,7 @@ const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
 const { MongoClient, ServerApiVersion } = require("mongodb");
+const stripe = require("stripe")(process.env.STRIPE_SECRET);   // <-- Stripe SDK
 
 const app = express();
 
@@ -54,14 +55,11 @@ async function connectDB() {
   const client = new MongoClient(MONGO_URI, {
     serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
   });
-
   await client.connect();
-  const db = client.db(DB_NAME);
 
+  const db = client.db(DB_NAME);
   cachedClient = client;
   cachedDb = db;
-
-  console.log("✅ MongoDB connected and cached");
   return { client, db };
 }
 
@@ -74,8 +72,42 @@ async function closeDb() {
   }
 }
 
+// ---------------- Helpers ----------------
+const wrap = (fn) => (req, res, next) => {
+  Promise.resolve(fn(req, res, next)).catch(next);
+};
+
+// ---------------- Stripe: create PaymentIntent ----------------
+app.post(
+  "/payments/create-payment-intent",
+  wrap(async (req, res) => {
+    const { amount, currency = "usd", userEmail, description = "" } = req.body || {};
+    if (!amount || !userEmail)
+      return res.status(400).send({ ok: false, message: "amount and userEmail required" });
+
+    const amt = Number(amount);
+    if (Number.isNaN(amt) || amt <= 0)
+      return res.status(400).send({ ok: false, message: "Invalid amount" });
+
+    const amountInCents = Math.round(amt * 100);
+    try {
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amountInCents,
+        currency,
+        receipt_email: userEmail,
+        description,
+        metadata: { userEmail },
+      });
+      res.send({ ok: true, clientSecret: paymentIntent.client_secret });
+    } catch (err) {
+      console.error("Stripe PaymentIntent error:", err);
+      res.status(500).send({ ok: false, message: "Could not create payment intent" });
+    }
+  })
+);
+
 // ------------- Test route -------------
-app.get("/", (req, res) => res.send("Database connection utilities ready"));
+app.get("/", (req, res) => res.send("Stripe PaymentIntent endpoint active"));
 
 // Exports & start
 module.exports = { app, connectDB, closeDb };
