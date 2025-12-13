@@ -952,6 +952,74 @@ app.get(
     res.send({ ok: true, data: summary });
   })
 );
+// ---------------- Routes: Admin Stats & Donor Search ----------------
+
+// GET /admin/stats – total counts for dashboard
+app.get(
+  "/admin/stats",
+  wrap(async (req, res) => {
+    const { db } = await connectDB();
+    const usersC = db.collection("users");
+    const fundsC = db.collection("funds");
+    const requestsC = db.collection("donationRequests");
+
+    // count in parallel
+    const [userCount, fundsAgg, requestCount] = await Promise.all([
+      usersC.countDocuments({}),
+      fundsC.aggregate([{ $group: { _id: null, total: { $sum: "$amount" } } }]).toArray(),
+      requestsC.countDocuments({}),
+    ]);
+
+    const totalFunds = (fundsAgg[0] && fundsAgg[0].total) || 0;
+    res.send({
+      ok: true,
+      data: {
+        users: userCount,
+        funds: totalFunds,
+        requests: requestCount,
+      },
+    });
+  })
+);
+
+// GET /search-donors – publicly searchable donor profiles
+app.get(
+  "/search-donors",
+  wrap(async (req, res) => {
+    const { db } = await connectDB();
+    const users = db.collection("users");
+
+    const { bloodGroup, district, upazila, page = 1, limit = 50 } = req.query;
+
+    const filter = { status: "active" };
+    if (bloodGroup) filter.bloodGroup = bloodGroup;
+    if (district) filter.district = district;
+    if (upazila) filter.upazila = upazila;
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const docs = await users
+      .find(filter)
+      .sort({ name: 1 })
+      .skip(skip)
+      .limit(Number(limit))
+      .toArray();
+
+    // Only return safe public fields
+    const safe = docs.map((u) => ({
+      _id: u._id,
+      name: u.name,
+      email: u.email,
+      avatar: u.avatar,
+      bloodGroup: u.bloodGroup,
+      district: u.district,
+      upazila: u.upazila,
+      role: u.role,
+      status: u.status,
+    }));
+
+    res.send({ ok: true, data: safe });
+  })
+);
 // ------------- Test route -------------
 app.get("/", (req, res) => res.send("Stripe PaymentIntent endpoint active"));
 
