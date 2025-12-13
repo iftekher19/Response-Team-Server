@@ -623,6 +623,103 @@ app.post(
     res.status(201).send({ ok: true, message: "Donation request created", data: result });
   })
 );
+
+// ---------------- Routes: Donation Requests (List) ----------------
+
+// Canonical route: GET /donation-requests
+app.get(
+  "/donation-requests",
+  wrap(async (req, res) => {
+    const { db } = await connectDB();
+    const requests = db.collection("donationRequests");
+
+    const filter = {};
+    const {
+      status,
+      bloodGroup,
+      district,
+      upazila,
+      requesterEmail,
+      page = 1,
+      limit = 50,
+    } = req.query;
+
+    if (status) filter.status = status;
+    if (bloodGroup) filter.bloodGroup = bloodGroup;
+    if (district) filter.recipientDistrict = district;
+    if (upazila) filter.recipientUpazila = upazila;
+    if (requesterEmail) filter.requesterEmail = requesterEmail;
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const docs = await requests
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit))
+      .toArray();
+
+    res.send({ ok: true, data: docs });
+  })
+);
+
+// Compatibility route: GET /requests (legacy frontend)
+app.get(
+  "/requests",
+  wrap(async (req, res) => {
+    const { db } = await connectDB();
+    const requests = db.collection("donationRequests");
+
+    const filter = {};
+    const {
+      status,
+      bloodGroup,
+      district,
+      upazila,
+      requesterEmail,
+      page = 1,
+      limit = 50,
+    } = req.query;
+
+    if (status) filter.status = status;
+    if (bloodGroup) filter.bloodGroup = bloodGroup;
+    if (district) filter.recipientDistrict = district;
+    if (upazila) filter.recipientUpazila = upazila;
+    if (requesterEmail) filter.requesterEmail = requesterEmail;
+
+    const skip = (Number(page) - 1) * Number(limit);
+    const docs = await requests
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(Number(limit))
+      .toArray();
+
+    res.send({ ok: true, data: docs });
+  })
+);
+
+// Convenience route: GET /requests/my?email=... -> latest 3 requests
+app.get(
+  "/requests/my",
+  wrap(async (req, res) => {
+    const email = req.query.email;
+    if (!email)
+      return res.status(400).send({ ok: false, message: "email query required" });
+
+    const limit = Number(req.query.limit) || 3;
+    const { db } = await connectDB();
+    const requests = db.collection("donationRequests");
+
+    const docs = await requests
+      .find({ requesterEmail: email })
+      .sort({ createdAt: -1 })
+      .limit(limit)
+      .toArray();
+
+    res.send({ ok: true, data: docs });
+  })
+);
+
 // ------------- Test route -------------
 app.get("/", (req, res) => res.send("Stripe PaymentIntent endpoint active"));
 
