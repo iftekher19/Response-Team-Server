@@ -197,6 +197,117 @@ app.get(
     }
   })
 );
+const bodyParser = require("body-parser"); // needed for raw body verification
+
+// ---------------- Stripe: webhook (raw body) ----------------
+app.post(
+  "/payments/webhook",
+  bodyParser.raw({ type: "application/json" }),
+  async (req, res) => {
+    const sig = req.headers["stripe-signature"];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+    let event;
+    try {
+      if (webhookSecret) {
+        // Verify webhook signature
+        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+      } else {
+        // Fallback: no verification in dev
+        event = JSON.parse(req.body.toString());
+      }
+    } catch (err) {
+      console.error("⚠️ Webhook verification failed:", err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    try {
+      switch (event.type) {
+        // When a PaymentIntent succeeds
+        case "payment_intent.succeeded": {
+          const pi = event.data.object;
+          const userEmail = pi.metadata?.userEmail || pi.receipt_email || null;
+          const { amount, currency, id: transactionId } = pi;
+          const { db } = await connectDB();
+          const funds = db.collection("funds");
+
+          const existing = await funds.findOne({ stripePaymentIntent: transactionId });
+          if (!existing) {
+            await funds.insertOne({
+              userEmail,
+              amount: amount / 100,
+              currency,
+              transactionId,
+              stripePaymentIntent: transactionId,
+              createdAt: new Date(),
+              meta: { stripe: true, source: "payment_intent.succeeded" },
+            });
+            console.log("✅ Recorded fund for PaymentIntent", transactionId);
+          } else {
+            console.log("Skipped duplicate fund for", transactionId);
+          }
+          break;
+        }
+
+        // When a Checkout Session completes
+        case "checkout.session.completed": {
+          const session = event.data.object;
+          try {
+            // Retrieve complete session details including payment_intent
+            const fullSession = await stripe.checkout.sessions.retrieve(session.id, { expand: ["payment_intent"] });
+            const userEmail = fullSession.customer_email || fullSession.metadata?.userEmail || null;
+            const amountCents = fullSession.amount_total ?? fullSession.payment_intent?.amount ?? 0;
+            const currency = fullSession.currency || fullSession.payment_intent?.currency || "usd";
+            const paymentIntentId = fullSession.payment_intent?.id || fullSession.payment_intent || null;
+
+            const { db } = await connectDB();
+            const funds = db.collection("funds");
+
+            const existing = await funds.findOne({
+              $or: [
+                { stripePaymentIntent: paymentIntentId },
+                { stripeCheckoutSession: session.id },
+              ],
+            });
+
+            if (!existing) {
+              await funds.insertOne({
+                userEmail,
+                amount: Number(amountCents) / 100,
+                currency,
+                transactionId: paymentIntentId || session.id,
+                stripeCheckoutSession: session.id,
+                stripePaymentIntent: paymentIntentId,
+                createdAt: new Date(),
+                meta: { stripe: true, source: "checkout.session.completed" },
+              });
+              console.log("✅ Recorded fund for Checkout Session", session.id);
+            } else {
+              console.log("Skipped duplicate session", session.id);
+            }
+          } catch (err) {
+            console.error("Failed to handle checkout.session.completed:", err);
+          }
+          break;
+        }
+
+        case "payment_intent.payment_failed": {
+          const pi = event.data.object;
+          console.warn("💸 Payment failed:", pi.last_payment_error?.message || "unknown reason");
+          break;
+        }
+
+        default:
+          console.log(`Unhandled Stripe event type: ${event.type}`);
+      }
+
+      res.json({ received: true });
+    } catch (err) {
+      console.error("Webhook processing error:", err);
+      res.status(500).send({ ok: false, message: "Webhook processing failed" });
+    }
+  }
+);
 
 // ------------- Test route -------------
 app.get("/", (req, res) => res.send("Stripe PaymentIntent endpoint active"));
