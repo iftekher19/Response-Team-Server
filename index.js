@@ -1,43 +1,48 @@
-// server.js
 require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
 const morgan = require("morgan");
-const { MongoClient, ServerApiVersion } = require("mongodb");
-const stripe = require("stripe")(process.env.STRIPE_SECRET);   // <-- Stripe SDK
+const bodyParser = require("body-parser"); // used for raw webhook body
+const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const stripe = require('stripe')(process.env.STRIPE_SECRET);
 
 const app = express();
 
 // ---------------- Config ----------------
 const PORT = Number(process.env.PORT) || 5000;
 const DB_NAME = process.env.DB_NAME || "responseTeamDB";
-let MONGO_URI = process.env.MONGO_URI || null;
 
+// Build MONGO_URI 
+let MONGO_URI = process.env.MONGO_URI || null;
 if (!MONGO_URI && process.env.DB_USER && process.env.DB_PASS && process.env.DB_HOST) {
-  MONGO_URI = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@${process.env.DB_HOST}`;
+  MONGO_URI = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@flash0.v0bnf8w.mongodb.net/?appName=flash0`;
 }
 if (!MONGO_URI && process.env.DB_USER && process.env.DB_PASS) {
   MONGO_URI = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@flash0.v0bnf8w.mongodb.net/?appName=flash0`;
 }
-if (!MONGO_URI) console.warn("WARNING: MONGO_URI not set. Configure .env correctly.");
 
-// ---------------- Middleware ----------------
-const CORS_ORIGINS = (process.env.CORS_ORIGINS ||
-  "http://localhost:5173,http://localhost:3000")
+if (!MONGO_URI) {
+  console.warn("WARNING: MONGO_URI not set. Set MONGO_URI or DB_USER & DB_PASS & DB_HOST in your .env");
+}
+
+// CORS origins
+const CORS_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173,http://localhost:3000")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
 
-app.use(helmet());
-app.use(morgan("dev"));
-app.use(express.json({ limit: "1mb" }));
+// ---------------- Middlewares ----------------
+app.use(helmet()); 
+app.use(express.json({ limit: "1mb" })); 
+app.use(morgan("dev")); 
 
 const corsOptions = {
   origin: (origin, cb) => {
+    // allow server-to-server or tools without origin
     if (!origin) return cb(null, true);
-    if (CORS_ORIGINS.includes(origin)) return cb(null, true);
-    return cb(new Error("CORS policy: origin not allowed"), false);
+    if (CORS_ORIGINS.indexOf(origin) !== -1) return cb(null, true);
+    return cb(new Error("CORS policy: This origin is not allowed"), false);
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   credentials: true,
@@ -50,16 +55,22 @@ let cachedDb = null;
 
 async function connectDB() {
   if (cachedDb && cachedClient) return { client: cachedClient, db: cachedDb };
-  if (!MONGO_URI) throw new Error("MONGO_URI not configured");
+
+  if (!MONGO_URI) {
+    throw new Error("MONGO_URI is not set. Set MONGO_URI or DB_USER & DB_PASS & DB_HOST env vars.");
+  }
 
   const client = new MongoClient(MONGO_URI, {
     serverApi: { version: ServerApiVersion.v1, strict: true, deprecationErrors: true },
   });
-  await client.connect();
 
+  await client.connect();
   const db = client.db(DB_NAME);
+
   cachedClient = client;
   cachedDb = db;
+
+  console.log("MongoDB connected (cached)");
   return { client, db };
 }
 
@@ -72,246 +83,11 @@ async function closeDb() {
   }
 }
 
-// ---------------- Helpers ----------------
+/// ---------------- Helpers ----------------
 const wrap = (fn) => (req, res, next) => {
   Promise.resolve(fn(req, res, next)).catch(next);
 };
 
-// ---------------- Stripe: create PaymentIntent ----------------
-app.post(
-  "/payments/create-payment-intent",
-  wrap(async (req, res) => {
-    const { amount, currency = "usd", userEmail, description = "" } = req.body || {};
-    if (!amount || !userEmail)
-      return res.status(400).send({ ok: false, message: "amount and userEmail required" });
-
-    const amt = Number(amount);
-    if (Number.isNaN(amt) || amt <= 0)
-      return res.status(400).send({ ok: false, message: "Invalid amount" });
-
-    const amountInCents = Math.round(amt * 100);
-    try {
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: amountInCents,
-        currency,
-        receipt_email: userEmail,
-        description,
-        metadata: { userEmail },
-      });
-      res.send({ ok: true, clientSecret: paymentIntent.client_secret });
-    } catch (err) {
-      console.error("Stripe PaymentIntent error:", err);
-      res.status(500).send({ ok: false, message: "Could not create payment intent" });
-    }
-  })
-);
-
-// ---------------- Stripe: create Checkout Session ----------------
-app.post(
-  "/create-checkout-session",
-  wrap(async (req, res) => {
-    const { amount, currency = "usd", userEmail, name = "Donation" } = req.body || {};
-    if (!amount || !userEmail)
-      return res.status(400).send({ ok: false, message: "amount and userEmail required" });
-
-    const amt = Number(amount);
-    if (Number.isNaN(amt) || amt <= 0)
-      return res.status(400).send({ ok: false, message: "Invalid amount" });
-
-    const amountCents = Math.round(amt * 100);
-
-    try {
-      const session = await stripe.checkout.sessions.create({
-        mode: "payment",
-        line_items: [
-          {
-            price_data: {
-              currency,
-              product_data: { name },
-              unit_amount: amountCents,
-            },
-            quantity: 1,
-          },
-        ],
-        customer_email: userEmail,
-        metadata: { userEmail },
-        success_url: `${process.env.CLIENT_URL || "http://localhost:5173"}/dashboard/funding-success`,
-        cancel_url: `${process.env.CLIENT_URL || "http://localhost:5173"}/funding-cancel`,
-      });
-
-      res.send({ ok: true, url: session.url, id: session.id });
-    } catch (err) {
-      console.error("create-checkout-session error:", err);
-      res.status(500).send({ ok: false, message: "Could not create checkout session" });
-    }
-  })
-);
-
-// ---------------- Stripe: retrieve Checkout Session ----------------
-app.get(
-  "/checkout-session",
-  wrap(async (req, res) => {
-    const sessionId = req.query.session_id || req.headers["x-session-id"];
-    if (!sessionId)
-      return res.status(400).send({ ok: false, message: "session_id query required" });
-
-    try {
-      const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent"] });
-
-      const userEmail = session.customer_email || session.metadata?.userEmail || null;
-      const amountCents = session.amount_total ?? session.payment_intent?.amount ?? 0;
-      const currency = session.currency || session.payment_intent?.currency || "usd";
-      const paymentIntentId = session.payment_intent?.id || session.payment_intent || null;
-      const checkoutSessionId = session.id;
-
-      const { db } = await connectDB();
-      const funds = db.collection("funds");
-
-      // Ensure idempotency — no duplicate records
-      const existing = await funds.findOne({
-        $or: [
-          { stripeCheckoutSession: checkoutSessionId },
-          { stripePaymentIntent: paymentIntentId },
-        ],
-      });
-
-      if (existing)
-        return res.send({ ok: true, recorded: false, message: "Already recorded", data: existing });
-
-      const doc = {
-        userEmail,
-        amount: Number(amountCents) / 100,
-        currency,
-        transactionId: paymentIntentId || checkoutSessionId,
-        stripeCheckoutSession: checkoutSessionId,
-        stripePaymentIntent: paymentIntentId,
-        createdAt: new Date(),
-        meta: { stripe: true, source: "checkout-session-reconcile" },
-      };
-
-      const result = await funds.insertOne(doc);
-      res.send({ ok: true, recorded: true, data: result });
-    } catch (err) {
-      console.error("Error retrieving checkout-session:", err);
-      res.status(500).send({ ok: false, message: "Failed to retrieve or record session", error: err.message });
-    }
-  })
-);
-const bodyParser = require("body-parser"); // needed for raw body verification
-
-// ---------------- Stripe: webhook (raw body) ----------------
-app.post(
-  "/payments/webhook",
-  bodyParser.raw({ type: "application/json" }),
-  async (req, res) => {
-    const sig = req.headers["stripe-signature"];
-    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
-
-    let event;
-    try {
-      if (webhookSecret) {
-        // Verify webhook signature
-        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
-      } else {
-        // Fallback: no verification in dev
-        event = JSON.parse(req.body.toString());
-      }
-    } catch (err) {
-      console.error("⚠️ Webhook verification failed:", err.message);
-      return res.status(400).send(`Webhook Error: ${err.message}`);
-    }
-
-    try {
-      switch (event.type) {
-        // When a PaymentIntent succeeds
-        case "payment_intent.succeeded": {
-          const pi = event.data.object;
-          const userEmail = pi.metadata?.userEmail || pi.receipt_email || null;
-          const { amount, currency, id: transactionId } = pi;
-          const { db } = await connectDB();
-          const funds = db.collection("funds");
-
-          const existing = await funds.findOne({ stripePaymentIntent: transactionId });
-          if (!existing) {
-            await funds.insertOne({
-              userEmail,
-              amount: amount / 100,
-              currency,
-              transactionId,
-              stripePaymentIntent: transactionId,
-              createdAt: new Date(),
-              meta: { stripe: true, source: "payment_intent.succeeded" },
-            });
-            console.log("✅ Recorded fund for PaymentIntent", transactionId);
-          } else {
-            console.log("Skipped duplicate fund for", transactionId);
-          }
-          break;
-        }
-
-        // When a Checkout Session completes
-        case "checkout.session.completed": {
-          const session = event.data.object;
-          try {
-            // Retrieve complete session details including payment_intent
-            const fullSession = await stripe.checkout.sessions.retrieve(session.id, { expand: ["payment_intent"] });
-            const userEmail = fullSession.customer_email || fullSession.metadata?.userEmail || null;
-            const amountCents = fullSession.amount_total ?? fullSession.payment_intent?.amount ?? 0;
-            const currency = fullSession.currency || fullSession.payment_intent?.currency || "usd";
-            const paymentIntentId = fullSession.payment_intent?.id || fullSession.payment_intent || null;
-
-            const { db } = await connectDB();
-            const funds = db.collection("funds");
-
-            const existing = await funds.findOne({
-              $or: [
-                { stripePaymentIntent: paymentIntentId },
-                { stripeCheckoutSession: session.id },
-              ],
-            });
-
-            if (!existing) {
-              await funds.insertOne({
-                userEmail,
-                amount: Number(amountCents) / 100,
-                currency,
-                transactionId: paymentIntentId || session.id,
-                stripeCheckoutSession: session.id,
-                stripePaymentIntent: paymentIntentId,
-                createdAt: new Date(),
-                meta: { stripe: true, source: "checkout.session.completed" },
-              });
-              console.log("✅ Recorded fund for Checkout Session", session.id);
-            } else {
-              console.log("Skipped duplicate session", session.id);
-            }
-          } catch (err) {
-            console.error("Failed to handle checkout.session.completed:", err);
-          }
-          break;
-        }
-
-        case "payment_intent.payment_failed": {
-          const pi = event.data.object;
-          console.warn(" Payment failed:", pi.last_payment_error?.message || "unknown reason");
-          break;
-        }
-
-        default:
-          console.log(`Unhandled Stripe event type: ${event.type}`);
-      }
-
-      res.json({ received: true });
-    } catch (err) {
-      console.error("Webhook processing error:", err);
-      res.status(500).send({ ok: false, message: "Webhook processing failed" });
-    }
-  }
-);
-// ---------------- Helpers for user management ----------------
-const { ObjectId } = require("mongodb");
-
-// small helper to wrap async routes (added before, reused here)
 const isValidObjectId = (id) => {
   try {
     return new ObjectId(id).toString() === id.toString();
@@ -328,37 +104,285 @@ function buildSetOnInsert(defaults, toSet) {
   return out;
 }
 
-// ---------------- Routes: User Auth Sync ----------------
-/**
- * POST /api/auth/sync
- * Accepts a user profile or idToken; upserts user by email.
- */
+// ---------------- Stripe: create PaymentIntent  ----------------
+app.post(
+  "/payments/create-payment-intent",
+  wrap(async (req, res) => {
+    const { amount, currency = "usd", userEmail, description = "" } = req.body || {};
+    if (!amount || !userEmail) return res.status(400).send({ ok: false, message: "amount and userEmail required" });
+
+    const amountNumber = Number(amount);
+    if (Number.isNaN(amountNumber) || amountNumber <= 0) {
+      return res.status(400).send({ ok: false, message: "Invalid amount" });
+    }
+    const amountInCents = Math.round(amountNumber * 100);
+
+    try {
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: amountInCents,
+        currency,
+        receipt_email: userEmail,
+        description,
+        metadata: { userEmail },
+      });
+      res.send({ ok: true, clientSecret: paymentIntent.client_secret });
+    } catch (err) {
+      console.error("Stripe create PaymentIntent error:", err);
+      res.status(500).send({ ok: false, message: "Could not create payment intent" });
+    }
+  })
+);
+
+// ---------------- Stripe: create Checkout Session (new) ----------------
+app.post(
+  "/create-checkout-session",
+  wrap(async (req, res) => {
+    try {
+      const { amount, userEmail, name = "Donation" } = req.body;
+
+      if (!amount || !userEmail) {
+        return res.status(400).send({ ok: false, message: "amount and userEmail required" });
+      }
+
+      const amountNumber = Number(amount);
+      if (Number.isNaN(amountNumber) || amountNumber <= 0) {
+        return res.status(400).send({ ok: false, message: "Invalid amount" });
+      }
+
+      const amountInCents = Math.round(amountNumber * 100);
+
+      console.log("Creating checkout:", {
+        amountInCents,
+        userEmail,
+        name,
+      });
+
+      const session = await stripe.checkout.sessions.create({
+        mode: "payment",
+        payment_method_types: ["card"],
+        line_items: [
+          {
+            price_data: {
+              currency: "usd",
+              product_data: { name },
+              unit_amount: amountInCents,
+            },
+            quantity: 1,
+          },
+        ],
+        customer_email: userEmail,
+        success_url: `${process.env.CLIENT_URL}/dashboard/funding-success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.CLIENT_URL}/funding-cancel`,
+      });
+
+      return res.send({ ok: true, url: session.url, id: session.id });
+    } catch (err) {
+      console.error("Stripe checkout error:", err);
+      return res.status(500).send({
+        ok: false,
+        message: "Stripe checkout failed",
+        error: err.message,
+      });
+    }
+  })
+);
+
+
+app.get(
+  "/checkout-session",
+  wrap(async (req, res) => {
+    const sessionId = req.query.session_id || req.headers["x-session-id"];
+    if (!sessionId) return res.status(400).send({ ok: false, message: "session_id query required" });
+
+    try {
+      const session = await stripe.checkout.sessions.retrieve(sessionId, { expand: ["payment_intent"] });
+
+      const userEmail = session.customer_email || session.metadata?.userEmail || null;
+      // amount_total is in cents
+      const amountCents = session.amount_total ?? session.payment_intent?.amount ?? null;
+      const currency = session.currency || session.payment_intent?.currency || null;
+      const paymentIntentId = session.payment_intent?.id || session.payment_intent || null;
+      const checkoutSessionId = session.id;
+
+      const { db } = await connectDB();
+      const funds = db.collection("funds");
+
+      // Check for existing record by checkoutSession or paymentIntent
+      const existing = await funds.findOne({
+        $or: [
+          { stripeCheckoutSession: checkoutSessionId },
+          { stripePaymentIntent: paymentIntentId }
+        ]
+      });
+
+      if (existing) {
+        return res.send({ ok: true, recorded: false, message: "Already recorded", data: existing });
+      }
+
+      // Insert new fund
+      const doc = {
+        userEmail,
+        donorName: session.customer_details?.name || session.metadata?.donorName || null,
+        amount: amountCents != null ? Number(amountCents) / 100 : 0,
+        currency,
+        transactionId: paymentIntentId || checkoutSessionId,
+        stripeCheckoutSession: checkoutSessionId,
+        stripePaymentIntent: paymentIntentId,
+        createdAt: new Date(),
+        meta: { stripe: true, source: "checkout-session-reconcile" }
+      };
+
+      const result = await funds.insertOne(doc);
+        return res.send({
+          ok: true,
+          donation: {
+            amount: doc.amount,
+            currency: doc.currency,
+            userEmail: doc.userEmail,
+            transactionId: doc.transactionId,
+            createdAt: doc.createdAt,
+          },
+      });
+    } catch (err) {
+      console.error("Error in GET /checkout-session:", err);
+      return res.status(500).send({ ok: false, message: "Failed to retrieve or record session", error: err.message });
+    }
+  })
+);
+
+// ---------------- Stripe: webhook ) ----------------
+app.post(
+  "/payments/webhook",
+  bodyParser.raw({ type: "application/json" }),
+  async (req, res) => {
+    const sig = req.headers["stripe-signature"];
+    const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+
+    let event;
+    try {
+      if (webhookSecret) {
+        event = stripe.webhooks.constructEvent(req.body, sig, webhookSecret);
+      } else {
+        event = JSON.parse(req.body.toString());
+      }
+    } catch (err) {
+      console.error("⚠️  Webhook signature verification failed.", err.message);
+      return res.status(400).send(`Webhook Error: ${err.message}`);
+    }
+
+    try {
+      // handle relevant events
+      switch (event.type) {
+        case "payment_intent.succeeded": {
+          const pi = event.data.object;
+          const userEmail = pi.metadata?.userEmail || pi.receipt_email || null;
+          const amountCents = pi.amount;
+          const currency = pi.currency;
+          const transactionId = pi.id;
+
+          try {
+            const { db } = await connectDB();
+            const funds = db.collection("funds");
+
+            //  check existing by stripePaymentIntent
+            const existing = await funds.findOne({ stripePaymentIntent: transactionId });
+            if (!existing) {
+              await funds.insertOne({
+                userEmail,
+                amount: Number(amountCents) / 100,
+                currency,
+                transactionId,
+                stripePaymentIntent: transactionId,
+                createdAt: new Date(),
+                meta: { stripe: true, source: "payment_intent.succeeded" },
+              });
+              console.log("Recorded fund for PI", transactionId);
+            } else {
+              console.log("Fund already recorded for PI", transactionId);
+            }
+          } catch (dbErr) {
+            console.error("Failed to record fund in DB:", dbErr);
+          }
+          break;
+        }
+
+        case "checkout.session.completed": {
+          const session = event.data.object;
+          try {
+            // fetch full session with payment_intent expanded for reliable fields
+            const fullSession = await stripe.checkout.sessions.retrieve(session.id, { expand: ["payment_intent"] });
+
+            const userEmail = fullSession.customer_email || fullSession.metadata?.userEmail || null;
+            const amountCents = fullSession.amount_total ?? (fullSession.payment_intent?.amount ?? null);
+            const currency = fullSession.currency || (fullSession.payment_intent?.currency || null);
+            const paymentIntentId = fullSession.payment_intent?.id || fullSession.payment_intent || null;
+            const checkoutSessionId = fullSession.id;
+
+            const { db } = await connectDB();
+            const funds = db.collection("funds");
+
+            // Avoid duplicates check by paymentIntentId or checkoutSessionId
+            const existing = await funds.findOne({
+              $or: [
+                { stripePaymentIntent: paymentIntentId },
+                { stripeCheckoutSession: checkoutSessionId }
+              ]
+            });
+
+            if (!existing) {
+              await funds.insertOne({
+                userEmail,
+                amount: amountCents != null ? Number(amountCents) / 100 : 0,
+                currency,
+                transactionId: paymentIntentId || checkoutSessionId,
+                stripeCheckoutSession: checkoutSessionId,
+                stripePaymentIntent: paymentIntentId,
+                createdAt: new Date(),
+                meta: { stripe: true, source: "checkout.session.completed", rawSession: fullSession }
+              });
+              console.log("Recorded fund (checkout.session.completed):", checkoutSessionId);
+            } else {
+              console.log("Fund already recorded for session:", checkoutSessionId);
+            }
+          } catch (err) {
+            console.error("Failed to handle checkout.session.completed:", err);
+          }
+          break;
+        }
+
+        case "payment_intent.payment_failed": {
+          const pi = event.data.object;
+          console.warn("Payment failed:", pi.last_payment_error?.message || "unknown reason");
+          break;
+        }
+
+        default:
+          console.log(`Unhandled Stripe event type: ${event.type}`);
+      }
+
+      res.json({ received: true });
+    } catch (err) {
+      console.error("Error handling webhook event:", err);
+      res.status(500).send({ ok: false, message: "Webhook handler error" });
+    }
+  }
+);
+
+// POST /api/auth/sync (compatibility with frontend)
 app.post(
   "/api/auth/sync",
   wrap(async (req, res) => {
     const payload = req.body || {};
-    if (!payload.email) {
-      return res.status(400).send({ ok: false, message: "email required" });
-    }
+    if (!payload.email) return res.status(400).send({ ok: false, message: "email required" });
 
     const { db } = await connectDB();
     const users = db.collection("users");
 
-    // only allow safe fields for upsert
-    const safeFields = [
-      "email",
-      "name",
-      "avatar",
-      "bloodGroup",
-      "district",
-      "upazila",
-      "role",
-      "status",
-    ];
-
+    // Only allow safe profile fields
+    const allowedProfileFields = ["email", "name", "avatar", "bloodGroup", "district", "upazila", "role", "status"];
     const toSet = {};
-    for (const field of safeFields) {
-      if (payload[field] !== undefined) toSet[field] = payload[field];
+    for (const k of allowedProfileFields) {
+      if (payload[k] !== undefined) toSet[k] = payload[k];
     }
 
     toSet.updatedAt = new Date();
@@ -376,43 +400,21 @@ app.post(
     res.send({ ok: true, message: "Auth sync upserted", data: result });
   })
 );
-// ---------------- Routes: Users ----------------
 
-/**
- * POST  /users          -> upsert user (called by frontend)
- * GET   /users          -> list / query users
- * PATCH /users/:id      -> partial update
- * PUT   /users/:id/profile -> replace/sync profile (email immutable)
- * PATCH /users/:id/role     -> update user role
- * PATCH /users/:id/status   -> update user status
- */
-
-// POST /users – upsert user by email
+// POST /users - upsert by email 
 app.post(
   "/users",
   wrap(async (req, res) => {
     const user = req.body || {};
-    if (!user.email)
-      return res.status(400).send({ ok: false, message: "Email is required" });
+    if (!user.email) return res.status(400).send({ ok: false, message: "Email is required" });
 
     const { db } = await connectDB();
     const users = db.collection("users");
 
-    const allowed = [
-      "email",
-      "name",
-      "avatar",
-      "bloodGroup",
-      "district",
-      "upazila",
-      "role",
-      "status",
-      "idToken",
-    ];
-
+    const allowed = ["email", "name", "avatar", "bloodGroup", "district", "upazila", "role", "status", "idToken"];
     const toSet = {};
-    for (const f of allowed) {
-      if (user[f] !== undefined) toSet[f] = user[f];
+    for (const k of allowed) {
+      if (user[k] !== undefined) toSet[k] = user[k];
     }
     toSet.updatedAt = new Date();
 
@@ -429,7 +431,7 @@ app.post(
   })
 );
 
-// GET /users – list or query
+// GET /users - list or query
 app.get(
   "/users",
   wrap(async (req, res) => {
@@ -446,37 +448,31 @@ app.get(
   })
 );
 
-// PATCH /users/:id – partial update (cannot change email)
+// PATCH /users/:id - partial update
 app.patch(
   "/users/:id",
   wrap(async (req, res) => {
     const id = req.params.id;
-    if (!isValidObjectId(id))
-      return res.status(400).send({ ok: false, message: "Invalid user id" });
+    if (!isValidObjectId(id)) return res.status(400).send({ ok: false, message: "Invalid user id" });
 
     const updates = { ...req.body };
-    delete updates.email;
+    delete updates.email; 
     updates.updatedAt = new Date();
 
     const { db } = await connectDB();
     const users = db.collection("users");
 
-    const result = await users.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: updates }
-    );
-
+    const result = await users.updateOne({ _id: new ObjectId(id) }, { $set: updates });
     res.send({ ok: true, message: "User updated", data: result });
   })
 );
 
-// PUT /users/:id/profile – update profile fields (immutable email)
+// PUT /users/:id/profile - convenience route, keep email immutable
 app.put(
   "/users/:id/profile",
   wrap(async (req, res) => {
     const id = req.params.id;
-    if (!isValidObjectId(id))
-      return res.status(400).send({ ok: false, message: "Invalid user id" });
+    if (!isValidObjectId(id)) return res.status(400).send({ ok: false, message: "Invalid user id" });
 
     const payload = { ...req.body };
     delete payload.email;
@@ -490,77 +486,59 @@ app.put(
 
     const { db } = await connectDB();
     const users = db.collection("users");
+    const result = await users.updateOne({ _id: new ObjectId(id) }, { $set: toSet });
 
-    const result = await users.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: toSet }
-    );
     res.send({ ok: true, message: "Profile updated", data: result });
   })
 );
 
-// PATCH /users/:id/role – change user role
+// PATCH role/status convenience
 app.patch(
   "/users/:id/role",
   wrap(async (req, res) => {
     const id = req.params.id;
+    if (!isValidObjectId(id)) return res.status(400).send({ ok: false, message: "Invalid user id" });
+
     const { role } = req.body;
-    if (!isValidObjectId(id))
-      return res.status(400).send({ ok: false, message: "Invalid user id" });
     if (!role) return res.status(400).send({ ok: false, message: "role required" });
 
     const { db } = await connectDB();
     const users = db.collection("users");
-    const result = await users.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: { role, updatedAt: new Date() } }
-    );
+    const result = await users.updateOne({ _id: new ObjectId(id) }, { $set: { role, updatedAt: new Date() } });
     res.send({ ok: true, message: "Role updated", data: result });
   })
 );
 
-// PATCH /users/:id/status – change user status
 app.patch(
   "/users/:id/status",
   wrap(async (req, res) => {
     const id = req.params.id;
+    if (!isValidObjectId(id)) return res.status(400).send({ ok: false, message: "Invalid user id" });
+
     const { status } = req.body;
-    if (!isValidObjectId(id))
-      return res.status(400).send({ ok: false, message: "Invalid user id" });
     if (!status) return res.status(400).send({ ok: false, message: "status required" });
 
     const { db } = await connectDB();
     const users = db.collection("users");
-    const result = await users.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: { status, updatedAt: new Date() } }
-    );
+    const result = await users.updateOne({ _id: new ObjectId(id) }, { $set: { status, updatedAt: new Date() } });
     res.send({ ok: true, message: "Status updated", data: result });
   })
 );
-// ---------------- Routes: Donation Requests (Create) ----------------
-/**
- * Canonical route: POST /donation-requests
- * Compatibility route: POST /requests
- */
 
+// Create donation request (canonical)
 app.post(
   "/donation-requests",
   wrap(async (req, res) => {
     const payload = req.body || {};
-    if (!payload.requesterEmail)
-      return res.status(400).send({ ok: false, message: "requesterEmail is required" });
+    if (!payload.requesterEmail) return res.status(400).send({ ok: false, message: "requesterEmail is required" });
 
     const { db } = await connectDB();
     const users = db.collection("users");
     const requests = db.collection("donationRequests");
 
-    // Verify requester exists and is allowed
     const requester = await users.findOne({ email: payload.requesterEmail });
-    if (!requester)
-      return res.status(400).send({ ok: false, message: "Requester not found" });
-    if (requester.status === "blocked")
-      return res.status(403).send({ ok: false, message: "User is blocked" });
+    if (!requester) return res.status(400).send({ ok: false, message: "Requester profile not found" });
+    if (requester.status === "blocked") return res.status(403).send({ ok: false, message: "User is blocked" });
 
     const newReq = {
       requesterEmail: payload.requesterEmail,
@@ -584,23 +562,20 @@ app.post(
   })
 );
 
-// Compatibility route: POST /requests
+// Compatibility: POST /requests -> create
 app.post(
   "/requests",
   wrap(async (req, res) => {
     const payload = req.body || {};
-    if (!payload.requesterEmail)
-      return res.status(400).send({ ok: false, message: "requesterEmail is required" });
+    if (!payload.requesterEmail) return res.status(400).send({ ok: false, message: "requesterEmail is required" });
 
     const { db } = await connectDB();
     const users = db.collection("users");
     const requests = db.collection("donationRequests");
 
     const requester = await users.findOne({ email: payload.requesterEmail });
-    if (!requester)
-      return res.status(400).send({ ok: false, message: "Requester not found" });
-    if (requester.status === "blocked")
-      return res.status(403).send({ ok: false, message: "User is blocked" });
+    if (!requester) return res.status(400).send({ ok: false, message: "Requester profile not found" });
+    if (requester.status === "blocked") return res.status(403).send({ ok: false, message: "User is blocked" });
 
     const newReq = {
       requesterEmail: payload.requesterEmail,
@@ -624,9 +599,7 @@ app.post(
   })
 );
 
-// ---------------- Routes: Donation Requests (List) ----------------
-
-// Canonical route: GET /donation-requests
+// Get donation requests 
 app.get(
   "/donation-requests",
   wrap(async (req, res) => {
@@ -634,15 +607,7 @@ app.get(
     const requests = db.collection("donationRequests");
 
     const filter = {};
-    const {
-      status,
-      bloodGroup,
-      district,
-      upazila,
-      requesterEmail,
-      page = 1,
-      limit = 50,
-    } = req.query;
+    const { status, bloodGroup, district, upazila, requesterEmail, page = 1, limit = 50 } = req.query;
 
     if (status) filter.status = status;
     if (bloodGroup) filter.bloodGroup = bloodGroup;
@@ -651,18 +616,13 @@ app.get(
     if (requesterEmail) filter.requesterEmail = requesterEmail;
 
     const skip = (Number(page) - 1) * Number(limit);
-    const docs = await requests
-      .find(filter)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(Number(limit))
-      .toArray();
-
+    const cursor = requests.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit));
+    const docs = await cursor.toArray();
     res.send({ ok: true, data: docs });
   })
 );
 
-// Compatibility route: GET /requests (legacy frontend)
+// Compatibility GET /requests -> list donation-requests 
 app.get(
   "/requests",
   wrap(async (req, res) => {
@@ -670,15 +630,7 @@ app.get(
     const requests = db.collection("donationRequests");
 
     const filter = {};
-    const {
-      status,
-      bloodGroup,
-      district,
-      upazila,
-      requesterEmail,
-      page = 1,
-      limit = 50,
-    } = req.query;
+    const { status, bloodGroup, district, upazila, requesterEmail, page = 1, limit = 50 } = req.query;
 
     if (status) filter.status = status;
     if (bloodGroup) filter.bloodGroup = bloodGroup;
@@ -687,95 +639,67 @@ app.get(
     if (requesterEmail) filter.requesterEmail = requesterEmail;
 
     const skip = (Number(page) - 1) * Number(limit);
-    const docs = await requests
-      .find(filter)
-      .sort({ createdAt: -1 })
-      .skip(skip)
-      .limit(Number(limit))
-      .toArray();
-
+    const cursor = requests.find(filter).sort({ createdAt: -1 }).skip(skip).limit(Number(limit));
+    const docs = await cursor.toArray();
     res.send({ ok: true, data: docs });
   })
 );
 
-// Convenience route: GET /requests/my?email=... -> latest 3 requests
+// Backwards-compatible GET /requests/my?email=<email>
 app.get(
   "/requests/my",
   wrap(async (req, res) => {
     const email = req.query.email;
-    if (!email)
-      return res.status(400).send({ ok: false, message: "email query required" });
+    if (!email) return res.status(400).send({ ok: false, message: "email query required" });
 
     const limit = Number(req.query.limit) || 3;
     const { db } = await connectDB();
     const requests = db.collection("donationRequests");
 
-    const docs = await requests
-      .find({ requesterEmail: email })
-      .sort({ createdAt: -1 })
-      .limit(limit)
-      .toArray();
-
+    const docs = await requests.find({ requesterEmail: email }).sort({ createdAt: -1 }).limit(limit).toArray();
     res.send({ ok: true, data: docs });
   })
 );
-// ---------------- Routes: Donation Requests (Read / Update) ----------------
 
-// GET /donation-requests/:id – fetch single request
+// Get single request 
 app.get(
   "/donation-requests/:id",
   wrap(async (req, res) => {
     const id = req.params.id;
-    if (!isValidObjectId(id))
-      return res.status(400).send({ ok: false, message: "Invalid request id" });
+    if (!isValidObjectId(id)) return res.status(400).send({ ok: false, message: "Invalid request id" });
 
     const { db } = await connectDB();
     const requests = db.collection("donationRequests");
     const doc = await requests.findOne({ _id: new ObjectId(id) });
-
-    if (!doc)
-      return res.status(404).send({ ok: false, message: "Request not found" });
-
+    if (!doc) return res.status(404).send({ ok: false, message: "Request not found" });
     res.send({ ok: true, data: doc });
   })
 );
 
-// Legacy alias: GET /requests/:id
+//GET /requests/:id
 app.get(
   "/requests/:id",
   wrap(async (req, res) => {
     const id = req.params.id;
-    if (!isValidObjectId(id))
-      return res.status(400).send({ ok: false, message: "Invalid request id" });
+    if (!isValidObjectId(id)) return res.status(400).send({ ok: false, message: "Invalid request id" });
 
     const { db } = await connectDB();
     const requests = db.collection("donationRequests");
     const doc = await requests.findOne({ _id: new ObjectId(id) });
-
-    if (!doc)
-      return res.status(404).send({ ok: false, message: "Request not found" });
-
+    if (!doc) return res.status(404).send({ ok: false, message: "Request not found" });
     res.send({ ok: true, data: doc });
   })
 );
 
-// PATCH /donation-requests/:id – update editable fields
+// Update request 
 app.patch(
   "/donation-requests/:id",
   wrap(async (req, res) => {
     const id = req.params.id;
-    if (!isValidObjectId(id))
-      return res.status(400).send({ ok: false, message: "Invalid request id" });
+    if (!isValidObjectId(id)) return res.status(400).send({ ok: false, message: "Invalid request id" });
 
     const updates = req.body || {};
-    const allowed = [
-      "status",
-      "donorName",
-      "donorEmail",
-      "donationDate",
-      "donationTime",
-      "requestMessage",
-    ];
+    const allowed = ["status", "donorName", "donorEmail", "donationDate", "donationTime", "requestMessage"];
     const toSet = {};
     for (const key of allowed) {
       if (updates[key] !== undefined) toSet[key] = updates[key];
@@ -784,32 +708,20 @@ app.patch(
 
     const { db } = await connectDB();
     const requests = db.collection("donationRequests");
-    const result = await requests.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: toSet }
-    );
-
+    const result = await requests.updateOne({ _id: new ObjectId(id) }, { $set: toSet });
     res.send({ ok: true, message: "Request updated", data: result });
   })
 );
 
-// Legacy alias: PATCH /requests/:id – same behavior
+// PATCH /requests/:id/status for UI convenience
 app.patch(
   "/requests/:id",
   wrap(async (req, res) => {
     const id = req.params.id;
-    if (!isValidObjectId(id))
-      return res.status(400).send({ ok: false, message: "Invalid request id" });
+    if (!isValidObjectId(id)) return res.status(400).send({ ok: false, message: "Invalid request id" });
 
     const updates = req.body || {};
-    const allowed = [
-      "status",
-      "donorName",
-      "donorEmail",
-      "donationDate",
-      "donationTime",
-      "requestMessage",
-    ];
+    const allowed = ["status", "donorName", "donorEmail", "donationDate", "donationTime", "requestMessage"];
     const toSet = {};
     for (const key of allowed) {
       if (updates[key] !== undefined) toSet[key] = updates[key];
@@ -818,143 +730,72 @@ app.patch(
 
     const { db } = await connectDB();
     const requests = db.collection("donationRequests");
-    const result = await requests.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: toSet }
-    );
-
+    const result = await requests.updateOne({ _id: new ObjectId(id) }, { $set: toSet });
     res.send({ ok: true, message: "Request updated", data: result });
   })
 );
 
-// Convenience: PATCH /requests/:id/status – quick status toggle
+// PATCH /requests/:id/status -> convenience for RequestCard change status button
 app.patch(
   "/requests/:id/status",
   wrap(async (req, res) => {
     const id = req.params.id;
-    if (!isValidObjectId(id))
-      return res.status(400).send({ ok: false, message: "Invalid request id" });
+    if (!isValidObjectId(id)) return res.status(400).send({ ok: false, message: "Invalid request id" });
 
     const { status } = req.body;
-    if (!status)
-      return res.status(400).send({ ok: false, message: "status required" });
+    if (!status) return res.status(400).send({ ok: false, message: "status required" });
 
     const { db } = await connectDB();
     const requests = db.collection("donationRequests");
-    const result = await requests.updateOne(
-      { _id: new ObjectId(id) },
-      { $set: { status, updatedAt: new Date() } }
-    );
-
+    const result = await requests.updateOne({ _id: new ObjectId(id) }, { $set: { status, updatedAt: new Date() } });
     res.send({ ok: true, message: "Status updated", data: result });
   })
 );
-// ---------------- Routes: Donation Requests (Delete) ----------------
 
-// Canonical deletion: DELETE /donation-requests/:id
+// Delete request canonical & compatibility
 app.delete(
   "/donation-requests/:id",
   wrap(async (req, res) => {
     const id = req.params.id;
-    if (!isValidObjectId(id))
-      return res.status(400).send({ ok: false, message: "Invalid request id" });
+    if (!isValidObjectId(id)) return res.status(400).send({ ok: false, message: "Invalid request id" });
 
     const { db } = await connectDB();
     const requests = db.collection("donationRequests");
-
     const result = await requests.deleteOne({ _id: new ObjectId(id) });
-    if (!result.deletedCount)
-      return res.status(404).send({ ok: false, message: "Request not found" });
-
+    if (!result.deletedCount) return res.status(404).send({ ok: false, message: "Request not found" });
     res.send({ ok: true, message: "Request deleted" });
   })
 );
 
-// Legacy deletion: DELETE /requests/:id
 app.delete(
   "/requests/:id",
   wrap(async (req, res) => {
     const id = req.params.id;
-    if (!isValidObjectId(id))
-      return res.status(400).send({ ok: false, message: "Invalid request id" });
+    if (!isValidObjectId(id)) return res.status(400).send({ ok: false, message: "Invalid request id" });
 
     const { db } = await connectDB();
     const requests = db.collection("donationRequests");
-
     const result = await requests.deleteOne({ _id: new ObjectId(id) });
-    if (!result.deletedCount)
-      return res.status(404).send({ ok: false, message: "Request not found" });
-
+    if (!result.deletedCount) return res.status(404).send({ ok: false, message: "Request not found" });
     res.send({ ok: true, message: "Request deleted" });
   })
 );
-// ---------------- Routes: Funds ----------------
 
-// POST /funds – record a donation manually
-app.post(
-  "/funds",
-  wrap(async (req, res) => {
-    const payload = req.body || {};
-    if (!payload.userEmail || payload.amount === undefined)
-      return res
-        .status(400)
-        .send({ ok: false, message: "userEmail and amount required" });
-
-    const { db } = await connectDB();
-    const funds = db.collection("funds");
-
-    const doc = {
-      userEmail: payload.userEmail,
-      amount: Number(payload.amount),
-      transactionId: payload.transactionId || null,
-      createdAt: new Date(),
-    };
-
-    const result = await funds.insertOne(doc);
-    res
-      .status(201)
-      .send({ ok: true, message: "Fund recorded successfully", data: result });
-  })
-);
-
-// GET /funds – list all recorded donations, newest first
+// GET /my-donation-requests?email= -> list requests by requesterEmail
 app.get(
-  "/funds",
+  "/my-donation-requests",
   wrap(async (req, res) => {
-    const { db } = await connectDB();
-    const funds = db.collection("funds");
+    const { email } = req.query;
+    if (!email) return res.status(400).send({ ok: false, message: "Email query required" });
 
-    const docs = await funds.find({}).sort({ createdAt: -1 }).toArray();
+    const { db } = await connectDB();
+    const requests = db.collection("donationRequests");
+    const docs = await requests.find({ requesterEmail: email }).sort({ createdAt: -1 }).toArray();
     res.send({ ok: true, data: docs });
   })
 );
 
-// GET /funds/summary – aggregated totals and count
-app.get(
-  "/funds/summary",
-  wrap(async (req, res) => {
-    const { db } = await connectDB();
-    const funds = db.collection("funds");
-
-    const agg = await funds
-      .aggregate([
-        {
-          $group: {
-            _id: null,
-            total: { $sum: "$amount" },
-            count: { $sum: 1 },
-          },
-        },
-      ])
-      .toArray();
-
-    const summary = agg[0] || { total: 0, count: 0 };
-    res.send({ ok: true, data: summary });
-  })
-);
-// ---------------- Routes: Admin Stats & Donor Search ----------------
-
-// GET /admin/stats – total counts for dashboard
+// GET /admin/stats  -> returns counts used by DashboardHome
 app.get(
   "/admin/stats",
   wrap(async (req, res) => {
@@ -963,26 +804,20 @@ app.get(
     const fundsC = db.collection("funds");
     const requestsC = db.collection("donationRequests");
 
-    // count in parallel
-    const [userCount, fundsAgg, requestCount] = await Promise.all([
+    // Perform counts and aggregation in parallel
+    const [usersCount, fundsAgg, requestsCount] = await Promise.all([
       usersC.countDocuments({}),
       fundsC.aggregate([{ $group: { _id: null, total: { $sum: "$amount" } } }]).toArray(),
       requestsC.countDocuments({}),
     ]);
 
     const totalFunds = (fundsAgg[0] && fundsAgg[0].total) || 0;
-    res.send({
-      ok: true,
-      data: {
-        users: userCount,
-        funds: totalFunds,
-        requests: requestCount,
-      },
-    });
+
+    res.send({ ok: true, data: { users: usersCount, funds: totalFunds, requests: requestsCount } });
   })
 );
 
-// GET /search-donors – publicly searchable donor profiles
+// ---------------- Search donors (public) ----------------
 app.get(
   "/search-donors",
   wrap(async (req, res) => {
@@ -990,21 +825,15 @@ app.get(
     const users = db.collection("users");
 
     const { bloodGroup, district, upazila, page = 1, limit = 50 } = req.query;
-
     const filter = { status: "active" };
+
     if (bloodGroup) filter.bloodGroup = bloodGroup;
     if (district) filter.district = district;
     if (upazila) filter.upazila = upazila;
 
     const skip = (Number(page) - 1) * Number(limit);
-    const docs = await users
-      .find(filter)
-      .sort({ name: 1 })
-      .skip(skip)
-      .limit(Number(limit))
-      .toArray();
+    const docs = await users.find(filter).skip(skip).limit(Number(limit)).toArray();
 
-    // Only return safe public fields
     const safe = docs.map((u) => ({
       _id: u._id,
       name: u.name,
@@ -1020,12 +849,49 @@ app.get(
     res.send({ ok: true, data: safe });
   })
 );
-// ------------- Test route -------------
-app.get("/", (req, res) => res.send("Stripe PaymentIntent endpoint active"));
+// ---------------- Funds listing & summary ----------------
+app.get(
+  "/funds",
+  wrap(async (req, res) => {
+    const { db } = await connectDB();
+    const funds = db.collection("funds");
+    const docs = await funds.find({}).sort({ createdAt: -1 }).toArray();
+    res.send({ ok: true, data: docs });
+  })
+);
 
-// Exports & start
-module.exports = { app, connectDB, closeDb };
+app.get(
+  "/funds/summary",
+  wrap(async (req, res) => {
+    const { db } = await connectDB();
+    const funds = db.collection("funds");
+    const agg = await funds.aggregate([{ $group: { _id: null, total: { $sum: "$amount" }, count: { $sum: 1 } } }]).toArray();
+    const summary = agg[0] || { total: 0, count: 0 };
+    res.send({ ok: true, data: { total: summary.total, count: summary.count } });
+  })
+);
+
+// ---------------- Basic routes & health ----------------
+app.get("/", (req, res) => res.send("Response Team - Blood Donation API is running"));
+app.get("/healthz", (req, res) => res.status(200).json({ ok: true, uptime: process.uptime() }));
+
+// ---------------- Error handler ----------------
+app.use((err, req, res, next) => {
+  console.error("Unhandled error:", err && err.stack ? err.stack : err);
+  if (err?.message?.includes("CORS policy")) {
+    return res.status(403).send({ ok: false, message: err.message });
+  }
+  const payload = process.env.NODE_ENV === "production"
+    ? { message: "Internal Server Error" }
+    : { message: err?.message || "Internal Server Error", stack: err?.stack };
+  res.status(500).send({ ok: false, ...payload });
+});
+
+// ---------------- Export & start ----------------
+module.exports = { app, closeDb };
 
 if (require.main === module) {
-  app.listen(PORT, () => console.log(`✅ Server listening on port ${PORT}`));
+  app.listen(PORT, () => {
+    console.log(`✅ Server listening on port ${PORT}`);
+  });
 }
