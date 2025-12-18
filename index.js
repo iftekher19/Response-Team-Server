@@ -9,9 +9,47 @@ const stripe = require('stripe')(process.env.STRIPE_SECRET);
 
 const app = express();
 
+const allowedOrigins = [
+  "http://localhost:5173",
+  "http://localhost:3000",
+  "https://response-team-9bbc2.web.app",
+  "https://response-team-9bbc2.firebaseapp.com",
+];
+
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) return callback(null, origin);
+      return callback(new Error("CORS_NOT_ALLOWED"));
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  })
+);
+
+// ✅ Express 5 compatible wildcard
+app.options(/.*/, cors());
+
+// Always expose credentials header
+app.use((req, res, next) => {
+  res.header("Access-Control-Allow-Credentials", "true");
+  next();
+});
+
+app.use(express.json({ limit: "1mb" }));
+app.use(helmet());
+app.use(morgan("dev"));
+
+
+
 // ---------------- Config ----------------
 const PORT = Number(process.env.PORT) || 5000;
 const DB_NAME = process.env.DB_NAME || "responseTeamDB";
+
+
+
 
 // Build MONGO_URI 
 let MONGO_URI = process.env.MONGO_URI || null;
@@ -26,28 +64,7 @@ if (!MONGO_URI) {
   console.warn("WARNING: MONGO_URI not set. Set MONGO_URI or DB_USER & DB_PASS & DB_HOST in your .env");
 }
 
-// CORS origins
-const CORS_ORIGINS = (process.env.CORS_ORIGINS || "http://localhost:5173,http://localhost:3000")
-  .split(",")
-  .map((s) => s.trim())
-  .filter(Boolean);
 
-// ---------------- Middlewares ----------------
-app.use(helmet()); 
-app.use(express.json({ limit: "1mb" })); 
-app.use(morgan("dev")); 
-
-const corsOptions = {
-  origin: (origin, cb) => {
-    // allow server-to-server or tools without origin
-    if (!origin) return cb(null, true);
-    if (CORS_ORIGINS.indexOf(origin) !== -1) return cb(null, true);
-    return cb(new Error("CORS policy: This origin is not allowed"), false);
-  },
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  credentials: true,
-};
-app.use(cors(corsOptions));
 
 // ---------------- MongoDB (cached) ----------------
 let cachedClient = null;
@@ -877,18 +894,29 @@ app.get("/healthz", (req, res) => res.status(200).json({ ok: true, uptime: proce
 
 // ---------------- Error handler ----------------
 app.use((err, req, res, next) => {
-  console.error("Unhandled error:", err && err.stack ? err.stack : err);
-  if (err?.message?.includes("CORS policy")) {
-    return res.status(403).send({ ok: false, message: err.message });
+  console.error("Unhandled error:", err?.message || err);
+
+  // Fix CORS errors
+  if (err?.message === "CORS_NOT_ALLOWED") {
+    res.header("Access-Control-Allow-Origin", req.headers.origin);
+    res.header("Access-Control-Allow-Credentials", "true");
+    return res.status(403).json({ ok: false, message: "CORS blocked" });
   }
-  const payload = process.env.NODE_ENV === "production"
-    ? { message: "Internal Server Error" }
-    : { message: err?.message || "Internal Server Error", stack: err?.stack };
-  res.status(500).send({ ok: false, ...payload });
+
+  res.header("Access-Control-Allow-Origin", req.headers.origin);
+  res.header("Access-Control-Allow-Credentials", "true");
+
+  res.status(500).json({
+    ok: false,
+    message:
+      process.env.NODE_ENV === "production"
+        ? "Internal Server Error"
+        : err?.message,
+  });
 });
 
 // ---------------- Export & start ----------------
-module.exports = { app, closeDb };
+module.exports = app;
 
 if (require.main === module) {
   app.listen(PORT, () => {
